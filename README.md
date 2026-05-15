@@ -1,6 +1,10 @@
 # Resumen Mensual Optimizado
 
-Aplicacion local para procesar el Resumen Mensual de Transacciones (RMT) del SRI Ecuador, consolidar bases por cliente/RUC y generar una salida Excel para formularios 104 y 103 usando la plantilla oficial de trabajo.
+[![Open in Streamlit](https://static.streamlit.io/badges/streamlit_badge_black_white.svg)](https://share.streamlit.io/deploy?repository=llpereirae-svg%2FRMT-claude&branch=main&mainModule=app.py)
+
+Aplicacion para procesar el Resumen Mensual de Transacciones (RMT) del SRI Ecuador, consolidar bases por cliente/RUC y generar una salida Excel para formularios 104 y 103 usando la plantilla oficial de trabajo.
+
+> **Demo / deploy**: el repo es publico, pero la app requiere autenticacion. Solicita un usuario al administrador. Los hashes de contrasena se cargan via Streamlit Cloud Secrets (ver `DEPLOY.md`).
 
 ## Stack
 
