@@ -100,8 +100,16 @@ def calcular_formularios(
     obligado_103: bool = False,
     base_iess_empleados: float = 0.0,
     retencion_empleados: float = 0.0,
+    ventas_0_con_credito: bool = False,
 ) -> FormularioCalculado:
-    cas104 = _calcular_104(rmt)
+    """Calcula casilleros 104 y 103.
+
+    Args:
+        ventas_0_con_credito: si True, las ventas locales 0% van al casillero 405/415
+            (contribuyente especial o con actividad que da derecho a CT). Si False (default),
+            van al 403/413 (sin derecho a CT, caso general).
+    """
+    cas104 = _calcular_104(rmt, ventas_0_con_credito=ventas_0_con_credito)
     cas103 = _calcular_103(rmt, obligado_103, base_iess_empleados, retencion_empleados)
     resumen = {
         "total_ventas_neto": cas104.get("419", 0.0),
@@ -125,12 +133,40 @@ def calcular_formularios(
 
 # ─── Cálculo Formulario 104 ────────────────────────────────────────────────────
 
-def _calcular_104(rmt: RMTProcesado) -> dict[str, float]:
+def _is_nota_venta(d: DocumentoRMT) -> bool:
+    """Una Nota de Venta indica que el proveedor es RISE / Negocio Popular.
+    En el RMT aparece en la columna TIPO (DOC ATS) o DOC (GASTOS DE VIAJE)."""
+    tipo = (d.extra.get("TIPO") or d.extra.get("DOC") or "").upper()
+    return "NOTA DE VENTA" in tipo
+
+
+def _is_gasto_deducible_sin_factura(d: DocumentoRMT) -> bool:
+    """Tipo de comprobante 'GASTO DEDUCIBLE SIN FACTURA' en gastos de viaje:
+    no se considera para el cálculo del 104 (per regla del contador)."""
+    doc = (d.extra.get("DOC") or "").upper()
+    return "GASTO DEDUCIBLE SIN FACTURA" in doc
+
+
+# Bloques que NO se consideran para el cálculo del 104 (per regla del contador).
+BLOQUES_EXCLUIDOS_104: frozenset[str] = frozenset({
+    "DOCUMENTOS RECIBIDOS QUE NO VAN EN EL ATS",
+    "FACTURAS RECIBIDAS (CEDULA)",
+})
+
+
+def _calcular_104(rmt: RMTProcesado, *, ventas_0_con_credito: bool = False) -> dict[str, float]:
     c: dict[str, float] = {}
 
     ventas = [d for d in rmt.documentos if d.grupo == "venta"]
     nc_ventas = [d for d in rmt.documentos if d.grupo == "nc_venta"]
-    compras = [d for d in rmt.documentos if d.grupo == "compra"]
+    # Filtrar compras: excluir bloques no declarables, gastos deducibles sin factura,
+    # y separar Notas de Venta (RISE/NP).
+    compras_todas = [d for d in rmt.documentos
+                     if d.grupo == "compra"
+                     and d.bloque not in BLOQUES_EXCLUIDOS_104
+                     and not _is_gasto_deducible_sin_factura(d)]
+    rise_np = [d for d in compras_todas if _is_nota_venta(d)]
+    compras = [d for d in compras_todas if not _is_nota_venta(d)]
     nc_compras = [d for d in rmt.documentos if d.grupo == "nc_compra"]
     importaciones = [d for d in rmt.documentos if d.grupo == "importacion"]
 
@@ -140,17 +176,23 @@ def _calcular_104(rmt: RMTProcesado) -> dict[str, float]:
     exports = [d for d in ventas if d.sustento.strip().upper() == "E"]
     loc_ventas = [d for d in ventas if d.sustento.strip().upper() != "E"]
 
-    # Base 0% local (gross y neto)
+    # Casilleros 403/413 vs 405/415 segun el regimen del contribuyente.
+    # 403/413: tarifa 0% que NO da derecho a credito tributario (default).
+    # 405/415: tarifa 0% que SI da derecho a CT (contribuyente especial / actividad especial).
+    cas_0_gross = "405" if ventas_0_con_credito else "403"
+    cas_0_net = "415" if ventas_0_con_credito else "413"
+
+    # Ventas locales 0% (gross y neto)
     gross_0 = _s(loc_ventas, "base_0") - _s(loc_ventas, "descuento_0")
     nc_0 = _s(nc_ventas, "base_0") - _s(nc_ventas, "descuento_0")
     net_0 = round(gross_0 - nc_0, 2)
     if net_0 >= 0:
-        c["401"] = gross_0
-        c["411"] = net_0
+        c[cas_0_gross] = gross_0
+        c[cas_0_net] = net_0
     else:
         c["442"] = round(abs(net_0), 2)
 
-    # Base IVA (tarifa variable, RMT la llama 12% pero es la tarifa vigente 15%)
+    # Ventas locales tarifa variable (15%, RMT la rotula 12% por legacy)
     gross_iva = _s(loc_ventas, "base_iva") - _s(loc_ventas, "descuento_iva")
     nc_iva_base = _s(nc_ventas, "base_iva") - _s(nc_ventas, "descuento_iva")
     net_iva = round(gross_iva - nc_iva_base, 2)
@@ -173,15 +215,15 @@ def _calcular_104(rmt: RMTProcesado) -> dict[str, float]:
     if net_no_obj > 0:
         c["431"] = net_no_obj
 
-    # Exportaciones → por defecto bienes (407); si hay ATS indicará servicios (408)
+    # Exportaciones → por defecto bienes (407); con ATS se podrá clasificar a 408 (servicios)
     export_total = _s(exports, "base_0") + _s(exports, "base_iva")
     if export_total > 0:
         c["407"] = round(export_total, 2)
         c["417"] = c["407"]
 
-    # Totales ventas
-    c["409"] = round(c.get("401", 0) + gross_iva + export_total + max(0, net_no_obj), 2)
-    c["419"] = round(c.get("411", 0) + max(0, net_iva) + export_total + max(0, net_no_obj), 2)
+    # Totales ventas: suma de tarifa variable + 0% local + exportaciones (no_objeto va aparte en 431)
+    c["409"] = round(gross_iva + gross_0 + export_total, 2)
+    c["419"] = round(max(0, net_iva) + max(0, net_0) + export_total, 2)
     if c.get("430"):
         c["429"] = c["430"]
 
@@ -192,47 +234,73 @@ def _calcular_104(rmt: RMTProcesado) -> dict[str, float]:
     net_iva_c = round(g_iva_c - nc_iva_c, 2)
     iva_c = round(_s(compras, "iva") - _s(nc_compras, "iva"), 2)
     c["500"] = round(g_iva_c, 2)
-    c["510"] = net_iva_c
-    c["520"] = max(0.0, iva_c)
-    if nc_iva_c > 0:
-        c["544"] = round(nc_iva_c, 2)
+    # Si la NC ya quedó neteada en 510, no se declara 544. Solo si excede al gross
+    # (caso analogo al patron 442/443 en ventas).
+    if net_iva_c >= 0:
+        c["510"] = net_iva_c
+        c["520"] = max(0.0, iva_c)
+    else:
+        c["510"] = 0.0
+        c["544"] = round(abs(net_iva_c), 2)
+        c["520"] = 0.0
+        c["554"] = 0.0  # se ajusta luego en liquidación
 
-    # Local 0%
+    # Adquisiciones locales tarifa 0% → casillero 507/517 (incluye AF tarifa 0%)
     g_0_c = _s(compras, "base_0") - _s(compras, "descuento_0")
     nc_0_c = _s(nc_compras, "base_0") - _s(nc_compras, "descuento_0")
     net_0_c = round(g_0_c - nc_0_c, 2)
-    c["502"] = round(g_0_c, 2)
-    c["512"] = net_0_c
+    if g_0_c > 0:
+        c["507"] = round(g_0_c, 2)
+        c["517"] = net_0_c
     if nc_0_c > 0:
         c["543"] = round(nc_0_c, 2)
 
-    # No objeto compras
-    no_obj_c = round(_s(compras, "no_objeto_iva"), 2)
+    # Adquisiciones a RISE / Negocios Populares → casillero 508/518
+    g_rise = _s(rise_np, "base_0") - _s(rise_np, "descuento_0")
+    if g_rise > 0:
+        c["508"] = round(g_rise, 2)
+        c["518"] = round(g_rise, 2)
+
+    # No objeto IVA en compras → casillero 531 (no entra en el total 509)
+    # Por instrucción del contador, incluye: NO OBJETO DE IVA + propina + % servicio
+    # de TODOS los bloques de compras (incluye RISE/NP y gastos de viaje).
+    todas_para_no_obj = compras + rise_np
+    no_obj_c = round(
+        _s(todas_para_no_obj, "no_objeto_iva") - _s(todas_para_no_obj, "descuento_no_objeto")
+        + _s(todas_para_no_obj, "propina")
+        + _s(todas_para_no_obj, "servicio"),
+        2,
+    )
     if no_obj_c > 0:
         c["531"] = no_obj_c
+        c["541"] = no_obj_c
 
     # Importaciones (Liquidación Aduanera)
     imp_base_iva = round(_s(importaciones, "base_iva"), 2)
     imp_base_0 = round(_s(importaciones, "base_0"), 2)
     imp_iva = round(_s(importaciones, "iva"), 2)
     if imp_base_iva > 0:
+        # Importaciones de bienes (excluye AF) tarifa ≠ 0
         c["504"] = imp_base_iva
         c["514"] = imp_base_iva
         c["524"] = imp_iva
     if imp_base_0 > 0:
-        c["505"] = imp_base_0
-        c["515"] = imp_base_0
+        # Importaciones de bienes (incluye AF) tarifa 0%
+        c["506"] = imp_base_0
+        c["516"] = imp_base_0
 
-    # Totales compras
-    c["509"] = round(g_iva_c + g_0_c + no_obj_c + imp_base_iva + imp_base_0, 2)
-    c["519"] = round(net_iva_c + net_0_c + no_obj_c + imp_base_iva + imp_base_0, 2)
+    # Total adquisiciones gravadas: 500 + 504 + 506 + 507 + 508 (no incluye 531/532)
+    c["509"] = round(g_iva_c + g_0_c + g_rise + imp_base_iva + imp_base_0, 2)
+    c["519"] = round(net_iva_c + max(0, net_0_c) + g_rise + imp_base_iva + imp_base_0, 2)
     c["529"] = round(c.get("520", 0) + imp_iva, 2)
 
     # ── LIQUIDACIÓN ──────────────────────────────────────────────────────────
-    total_ventas = c.get("419", 1.0) or 1.0
-    # Ventas que generan crédito: tarifa variable + exportaciones
+    total_ventas = c.get("419", 0.0)
+    # Ventas con derecho a CT = tarifa variable + exportaciones (+ ventas 0% si aplica)
     ventas_con_credito = max(0, net_iva) + export_total
-    factor = round(ventas_con_credito / total_ventas, 4) if total_ventas > 0 else 1.0
+    if ventas_0_con_credito:
+        ventas_con_credito += max(0, net_0)
+    factor = round(ventas_con_credito / total_ventas, 4) if total_ventas > 0 else 0.0
     c["563"] = factor
 
     iva_credito = round((c.get("520", 0) + c.get("524", 0)) * factor, 2)
@@ -259,6 +327,8 @@ def _calcular_104(rmt: RMTProcesado) -> dict[str, float]:
     # Total consolidado 859 = 699 (percepción, generalmente = 601) + 801
     c["699"] = c.get("601", 0.0)
     c["859"] = round(c.get("699", 0) + c.get("801", 0), 2)
+    # Total a pagar final 902 (= 859 cuando no hay pagos previos en 898)
+    c["902"] = c["859"]
 
     # ── CONTEO DE COMPROBANTES ───────────────────────────────────────────────
     emit_ok = [d for d in rmt.documentos if d.grupo in ("venta",) and d.estado != "ANULADO"]

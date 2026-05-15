@@ -25,6 +25,7 @@ SECTION_NAMES = {
     "NOTAS DE DEBITO RECIBIDAS:",
     "RETENCIONES RECIBIDAS:",
     "LIQUIDACION ADUANERA:",
+    "ANULADOS",  # sin ":" — el RMT lo escribe como titulo simple
 }
 
 HEADER_ROWS = {
@@ -41,6 +42,7 @@ HEADER_ROWS = {
     "NOTAS DE DEBITO RECIBIDAS:": 1,
     "RETENCIONES RECIBIDAS:": 1,
     "LIQUIDACION ADUANERA:": 1,
+    "ANULADOS": 2,  # tiene una fila en blanco antes del header de columnas
 }
 
 
@@ -152,10 +154,32 @@ def _append_row(parsed: RMTProcesado, section: str, row: dict[str, Any]) -> None
     if section == "LIQUIDACION ADUANERA:":
         parsed.documentos.append(_aduana(row))
         return
+    if section == "ANULADOS":
+        anulado = _anulado_block(row)
+        if anulado is not None:
+            parsed.anulados.append(anulado)
+        return
     if _is_annulled(row):
         parsed.anulados.append(_anulado(section, row))
         return
     parsed.documentos.append(_documento(section, row))
+
+
+def _anulado_block(row: dict[str, Any]) -> "AnuladoRMT | None":
+    """Parsea una fila del bloque ANULADOS (estructura propia: TIPO DE DOCUMENTO / FECHA /
+    SERIE-NUMERO / AUTORIZACION / RUC CLIENTE/PROVE / NOMBRE CLIENTE/PRO / TOTAL)."""
+    tipo = _text(_first(row, "TIPO DE DOCUMENTO"))
+    if not tipo:
+        return None
+    return AnuladoRMT(
+        tipo=tipo,
+        fecha=_date(_first(row, "FECHA")),
+        numero=_text(_first(row, "SERIE-NUMERO")),
+        autorizacion=_clean_authorization(_first(row, "AUTORIZACION")),
+        contraparte_id=_clean_party(_first(row, "RUC CLIENTE/PROVEEDOR", "RUC")),
+        contraparte_nombre=_text(_first(row, "NOMBRE CLIENTE/PROVEEDOR", "NOMBRE")),
+        total=_num(_first(row, "TOTAL")),
+    )
 
 
 def _documento(section: str, row: dict[str, Any]) -> DocumentoRMT:

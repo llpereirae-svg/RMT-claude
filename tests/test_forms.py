@@ -76,12 +76,24 @@ def test_104_venta_tarifa_variable_simple():
     assert r.casilleros_104["430"] == 150.0
 
 
-def test_104_venta_0_porciento():
-    """Factura 0% va al casillero 401 (gross) y 411 (neto)."""
+def test_104_venta_0_porciento_sin_credito_default():
+    """Factura 0% (caso general) va a 403/413: tarifa 0% que NO da derecho a CT."""
     rmt = _rmt(documentos=[_venta(base_0=500.0)])
     r = calcular_formularios(rmt)
-    assert r.casilleros_104["401"] == 500.0
-    assert r.casilleros_104["411"] == 500.0
+    assert r.casilleros_104["403"] == 500.0
+    assert r.casilleros_104["413"] == 500.0
+    # No debe escribir nada en 401/411 (tarifa ≠ 0)
+    assert "401" not in r.casilleros_104
+    assert "411" not in r.casilleros_104
+
+
+def test_104_venta_0_porciento_con_credito_contri_especial():
+    """Contribuyente especial: ventas 0% van a 405/415 (con derecho a CT)."""
+    rmt = _rmt(documentos=[_venta(base_0=500.0)])
+    r = calcular_formularios(rmt, ventas_0_con_credito=True)
+    assert r.casilleros_104["405"] == 500.0
+    assert r.casilleros_104["415"] == 500.0
+    assert "403" not in r.casilleros_104
 
 
 def test_104_nc_neteo_normal():
@@ -132,18 +144,58 @@ def test_104_compra_con_iva_genera_credito():
     assert r.casilleros_104["554"] == 150.0
 
 
-def test_104_factor_proporcionalidad_solo_ventas_0():
-    """Si todas las ventas son 0%, no hay crédito tributario (factor = 0)."""
+def test_104_factor_proporcionalidad_solo_ventas_0_sin_credito():
+    """Ventas 0% sin CT: factor 563 = 0, no hay crédito aplicable."""
     rmt = _rmt(documentos=[
         _venta(base_0=1000.0),
         _compra(base_iva=500.0, iva=75.0),
     ])
     r = calcular_formularios(rmt)
-    # Los casilleros con valor 0 se omiten del dict (filtrado por forms.py)
     assert r.casilleros_104.get("563", 0.0) == 0.0
     assert r.casilleros_104.get("554", 0.0) == 0.0
-    # Pero el IVA de las compras sí queda registrado
+    # IVA de compras queda registrado en 520 aunque no se pueda usar como CT
     assert r.casilleros_104["520"] == 75.0
+
+
+def test_104_factor_proporcionalidad_solo_ventas_0_con_credito():
+    """Ventas 0% con CT (contri especial): factor 563 = 1.0, todo el IVA es crédito."""
+    rmt = _rmt(documentos=[
+        _venta(base_0=1000.0),
+        _compra(base_iva=500.0, iva=75.0),
+    ])
+    r = calcular_formularios(rmt, ventas_0_con_credito=True)
+    assert r.casilleros_104["563"] == 1.0
+    assert r.casilleros_104["554"] == 75.0
+
+
+def test_104_compras_0_porciento_van_a_507():
+    """Compras locales 0% van al casillero 507/517 (no al 502/512)."""
+    rmt = _rmt(documentos=[_compra(base_0=300.0)])
+    r = calcular_formularios(rmt)
+    assert r.casilleros_104["507"] == 300.0
+    assert r.casilleros_104["517"] == 300.0
+    assert "502" not in r.casilleros_104
+    assert "512" not in r.casilleros_104
+
+
+def test_104_importaciones_0_porciento_van_a_506():
+    """Importaciones tarifa 0% van al casillero 506/516 (no al 505/515)."""
+    importacion = DocumentoRMT(
+        bloque="LIQUIDACION ADUANERA",
+        grupo="importacion",
+        numero="IMP-001",
+        fecha_emision=None,
+        fecha_carga=None,
+        contraparte_id="000000000001",
+        contraparte_nombre="ADUANA",
+        base_0=2500.0,
+    )
+    rmt = _rmt(documentos=[importacion])
+    r = calcular_formularios(rmt)
+    assert r.casilleros_104["506"] == 2500.0
+    assert r.casilleros_104["516"] == 2500.0
+    assert "505" not in r.casilleros_104
+    assert "515" not in r.casilleros_104
 
 
 # ─── IVA retenido (agente de retención) ──────────────────────────────────

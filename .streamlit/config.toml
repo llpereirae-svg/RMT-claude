@@ -1,0 +1,15 @@
+# Tema corporativo inspirado en SAP S/4HANA
+[theme]
+base = "light"
+primaryColor = "#0a6ed1"
+backgroundColor = "#f5f6f7"
+secondaryBackgroundColor = "#ffffff"
+textColor = "#32363a"
+font = "sans serif"
+
+[server]
+headless = true
+runOnSave = true
+
+[browser]
+gatherUsageStats = false

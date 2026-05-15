@@ -135,6 +135,9 @@ def get_conn(db_path: Path):
     init_db(db_path)
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
+    # PRAGMA foreign_keys es por-conexion en SQLite. Sin esto, ON DELETE CASCADE
+    # no se aplica y reprocesar un RMT deja documentos/casilleros huerfanos.
+    conn.execute("PRAGMA foreign_keys = ON")
     try:
         yield conn
         conn.commit()
