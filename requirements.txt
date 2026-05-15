@@ -3,3 +3,4 @@ pandas>=2.2
 lxml>=5.1
 openpyxl>=3.1
 pywin32>=306; sys_platform == "win32"
+pytest>=8.0
