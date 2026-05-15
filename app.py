@@ -28,25 +28,59 @@ MIME_XLSX = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 
 
 # ─── Hidratar usuarios desde st.secrets (Streamlit Cloud) ────────────────────
-def _hydrate_users_from_secrets() -> None:
-    """En Streamlit Cloud, si no existe el archivo local de usuarios pero hay un
-    secret 'users', escribirlo a disco para que auth.py lo encuentre.
-    En local, este paso no hace nada porque el archivo ya existe."""
+def _hydrate_users_from_secrets() -> dict:
+    """En Streamlit Cloud, carga st.secrets['users'] al store en memoria de auth.
+    Devuelve un diagnostico {found, source, count, error}.
+    En local con archivo .streamlit/users.json existente, no hace nada (file wins)."""
+    diag = {"found": False, "source": None, "count": 0, "error": None}
+
+    # Si ya hay archivo local con usuarios, ese gana (modo dev).
     if auth.USERS_FILE.exists():
-        return
+        try:
+            raw = json.loads(auth.USERS_FILE.read_text(encoding="utf-8"))
+            diag.update(found=True, source="file", count=len(raw))
+        except (json.JSONDecodeError, OSError) as exc:
+            diag.update(error=f"file_read_error: {exc}")
+        return diag
+
+    # Caso cloud: leer de Secrets y cargar al store en memoria.
     try:
-        secret_users = st.secrets.get("users")  # dict TOML anidado
-    except (FileNotFoundError, KeyError, AttributeError):
-        return
+        secret_users = st.secrets.get("users")
+    except Exception as exc:
+        diag.update(error=f"secrets_access_error: {type(exc).__name__}: {exc}")
+        return diag
+
     if not secret_users:
-        return
-    # Convertir Secrets object a dict puro
-    content = {k: dict(v) for k, v in dict(secret_users).items()}
-    auth.USERS_FILE.parent.mkdir(parents=True, exist_ok=True)
-    auth.USERS_FILE.write_text(json.dumps(content, ensure_ascii=False, indent=2), encoding="utf-8")
+        diag.update(error="no 'users' key in st.secrets")
+        return diag
+
+    try:
+        content = {}
+        for username, info in dict(secret_users).items():
+            content[str(username)] = dict(info)
+        auth.use_memory_store(content)
+        diag.update(found=True, source="secrets", count=len(content))
+    except Exception as exc:
+        diag.update(error=f"hydration_error: {type(exc).__name__}: {exc}")
+    return diag
 
 
-_hydrate_users_from_secrets()
+_users_diag = _hydrate_users_from_secrets()
+
+
+# ─── Panel de diagnostico (URL ?debug=secrets) ──────────────────────────────
+if st.query_params.get("debug") == "secrets":
+    st.title("Diagnóstico de autenticación")
+    st.json(_users_diag)
+    st.write("Usuarios cargados (solo nombres, sin hashes):")
+    try:
+        st.write(list(auth._load_users_raw().keys()))
+    except Exception as exc:
+        st.error(f"No se pueden listar usuarios: {exc}")
+    st.write("USERS_FILE existe:", auth.USERS_FILE.exists())
+    st.write("USERS_FILE path:", str(auth.USERS_FILE))
+    st.caption("Quita el `?debug=secrets` del URL para volver al login normal.")
+    st.stop()
 
 st.set_page_config(
     page_title="RMT Suite",

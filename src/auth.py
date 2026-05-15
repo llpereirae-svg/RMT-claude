@@ -18,6 +18,22 @@ ROOT = Path(__file__).resolve().parent.parent
 USERS_FILE = ROOT / ".streamlit" / "users.json"
 PBKDF2_ITERATIONS = 200_000
 
+# Fallback en memoria: tiene prioridad sobre el archivo. Util en entornos donde
+# el filesystem es read-only o efimero (Streamlit Cloud).
+_MEMORY_USERS: dict[str, dict] | None = None
+
+
+def use_memory_store(users: dict[str, dict]) -> None:
+    """Carga usuarios en un store en memoria. Tiene prioridad sobre el archivo."""
+    global _MEMORY_USERS
+    _MEMORY_USERS = {k: dict(v) for k, v in users.items()}
+
+
+def clear_memory_store() -> None:
+    """Limpia el store en memoria (volver a leer del archivo). Util en tests."""
+    global _MEMORY_USERS
+    _MEMORY_USERS = None
+
 
 @dataclass
 class Usuario:
@@ -48,6 +64,8 @@ def verify_password(password: str, salt_hex: str, hash_hex: str) -> bool:
 
 # ─── Persistencia del archivo de usuarios ────────────────────────────────────
 def _load_users_raw() -> dict[str, dict]:
+    if _MEMORY_USERS is not None:
+        return _MEMORY_USERS
     if not USERS_FILE.exists():
         return {}
     try:
@@ -57,8 +75,15 @@ def _load_users_raw() -> dict[str, dict]:
 
 
 def _save_users_raw(users: dict[str, dict]) -> None:
-    USERS_FILE.parent.mkdir(parents=True, exist_ok=True)
-    USERS_FILE.write_text(json.dumps(users, indent=2, ensure_ascii=False), encoding="utf-8")
+    # Si hay store en memoria activo, actualizarlo siempre.
+    if _MEMORY_USERS is not None:
+        use_memory_store(users)
+    # Intentar persistir a disco (en cloud puede ser read-only o efimero).
+    try:
+        USERS_FILE.parent.mkdir(parents=True, exist_ok=True)
+        USERS_FILE.write_text(json.dumps(users, indent=2, ensure_ascii=False), encoding="utf-8")
+    except OSError:
+        pass  # filesystem no escribible — solo queda en memoria
 
 
 def _to_usuario(username: str, info: dict) -> Usuario:
