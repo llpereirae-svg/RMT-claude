@@ -8,6 +8,7 @@ from pathlib import Path
 
 import openpyxl
 
+from .ats_models import ATSProcesado
 from .models import DocumentoRMT, FormularioCalculado, RetencionRMT, RMTProcesado
 
 # ─── Mapeo casillero → celda de valor en plantilla ───────────────────────────
@@ -97,6 +98,7 @@ CELDA_103: dict[str, str] = {
 def calcular_formularios(
     rmt: RMTProcesado,
     *,
+    ats: ATSProcesado | None = None,
     obligado_103: bool = False,
     base_iess_empleados: float = 0.0,
     retencion_empleados: float = 0.0,
@@ -105,12 +107,14 @@ def calcular_formularios(
     """Calcula casilleros 104 y 103.
 
     Args:
+        ats: si se provee, se usa para refinar 407/408 (exportaciones bienes vs servicios),
+            531/541 (baseNoGraIva exacta) y 332 del F103 (codRetAir).
         ventas_0_con_credito: si True, las ventas locales 0% van al casillero 405/415
             (contribuyente especial o con actividad que da derecho a CT). Si False (default),
             van al 403/413 (sin derecho a CT, caso general).
     """
-    cas104 = _calcular_104(rmt, ventas_0_con_credito=ventas_0_con_credito)
-    cas103 = _calcular_103(rmt, obligado_103, base_iess_empleados, retencion_empleados)
+    cas104 = _calcular_104(rmt, ats=ats, ventas_0_con_credito=ventas_0_con_credito)
+    cas103 = _calcular_103(rmt, obligado_103, base_iess_empleados, retencion_empleados, ats=ats)
     resumen = {
         "total_ventas_neto": cas104.get("419", 0.0),
         "iva_generado": cas104.get("430", 0.0),
@@ -154,7 +158,12 @@ BLOQUES_EXCLUIDOS_104: frozenset[str] = frozenset({
 })
 
 
-def _calcular_104(rmt: RMTProcesado, *, ventas_0_con_credito: bool = False) -> dict[str, float]:
+def _calcular_104(
+    rmt: RMTProcesado,
+    *,
+    ats: ATSProcesado | None = None,
+    ventas_0_con_credito: bool = False,
+) -> dict[str, float]:
     c: dict[str, float] = {}
 
     ventas = [d for d in rmt.documentos if d.grupo == "venta"]
@@ -215,15 +224,30 @@ def _calcular_104(rmt: RMTProcesado, *, ventas_0_con_credito: bool = False) -> d
     if net_no_obj > 0:
         c["431"] = net_no_obj
 
-    # Exportaciones → por defecto bienes (407); con ATS se podrá clasificar a 408 (servicios)
+    # Exportaciones → si hay ATS, separar bienes (407) vs servicios (408) por exportacionDe.
+    # Sin ATS, asumir bienes (caso comun) per fallback.
     export_total = _s(exports, "base_0") + _s(exports, "base_iva")
-    if export_total > 0:
+    if ats is not None and (ats.total_export_bienes + ats.total_export_servicios) > 0:
+        if ats.total_export_bienes > 0:
+            c["407"] = ats.total_export_bienes
+            c["417"] = ats.total_export_bienes
+        if ats.total_export_servicios > 0:
+            c["408"] = ats.total_export_servicios
+            c["418"] = ats.total_export_servicios
+    elif export_total > 0:
         c["407"] = round(export_total, 2)
         c["417"] = c["407"]
 
+    # Si hay ATS, el total de exportaciones es el oficial (FOB+seguro+flete).
+    export_total_eff = (
+        ats.total_export_bienes + ats.total_export_servicios
+        if ats is not None and (ats.total_export_bienes + ats.total_export_servicios) > 0
+        else export_total
+    )
+
     # Totales ventas: suma de tarifa variable + 0% local + exportaciones (no_objeto va aparte en 431)
-    c["409"] = round(gross_iva + gross_0 + export_total, 2)
-    c["419"] = round(max(0, net_iva) + max(0, net_0) + export_total, 2)
+    c["409"] = round(gross_iva + gross_0 + export_total_eff, 2)
+    c["419"] = round(max(0, net_iva) + max(0, net_0) + export_total_eff, 2)
     if c.get("430"):
         c["429"] = c["430"]
 
@@ -261,16 +285,19 @@ def _calcular_104(rmt: RMTProcesado, *, ventas_0_con_credito: bool = False) -> d
         c["508"] = round(g_rise, 2)
         c["518"] = round(g_rise, 2)
 
-    # No objeto IVA en compras → casillero 531 (no entra en el total 509)
-    # Por instrucción del contador, incluye: NO OBJETO DE IVA + propina + % servicio
-    # de TODOS los bloques de compras (incluye RISE/NP y gastos de viaje).
-    todas_para_no_obj = compras + rise_np
-    no_obj_c = round(
-        _s(todas_para_no_obj, "no_objeto_iva") - _s(todas_para_no_obj, "descuento_no_objeto")
-        + _s(todas_para_no_obj, "propina")
-        + _s(todas_para_no_obj, "servicio"),
-        2,
-    )
+    # No objeto IVA en compras → casillero 531 (no entra en el total 509).
+    # Si hay ATS, usar suma exacta de baseNoGraIva en <compras> (es el dato declarado oficialmente).
+    # Sin ATS, aproximar desde el RMT: NO OBJETO DE IVA + propina + % servicio.
+    if ats is not None and ats.total_base_no_gra_iva > 0:
+        no_obj_c = ats.total_base_no_gra_iva
+    else:
+        todas_para_no_obj = compras + rise_np
+        no_obj_c = round(
+            _s(todas_para_no_obj, "no_objeto_iva") - _s(todas_para_no_obj, "descuento_no_objeto")
+            + _s(todas_para_no_obj, "propina")
+            + _s(todas_para_no_obj, "servicio"),
+            2,
+        )
     if no_obj_c > 0:
         c["531"] = no_obj_c
         c["541"] = no_obj_c
@@ -297,7 +324,7 @@ def _calcular_104(rmt: RMTProcesado, *, ventas_0_con_credito: bool = False) -> d
     # ── LIQUIDACIÓN ──────────────────────────────────────────────────────────
     total_ventas = c.get("419", 0.0)
     # Ventas con derecho a CT = tarifa variable + exportaciones (+ ventas 0% si aplica)
-    ventas_con_credito = max(0, net_iva) + export_total
+    ventas_con_credito = max(0, net_iva) + export_total_eff
     if ventas_0_con_credito:
         ventas_con_credito += max(0, net_0)
     factor = round(ventas_con_credito / total_ventas, 4) if total_ventas > 0 else 0.0
@@ -350,6 +377,8 @@ def _calcular_103(
     obligado: bool,
     base_iess: float,
     ret_empleados: float,
+    *,
+    ats: ATSProcesado | None = None,
 ) -> dict[str, float]:
     if not obligado:
         return {}
@@ -364,33 +393,46 @@ def _calcular_103(
         c["302"] = round(base_iess, 2)
         c["352"] = round(ret_empleados, 2)
 
-    # Retenciones emitidas agrupadas por código IR
-    por_codigo: dict[str, dict[str, float]] = defaultdict(lambda: {"base": 0.0, "valor": 0.0})
-    for r in ret_emit:
-        if r.codigo_ir:
-            por_codigo[r.codigo_ir]["base"] += r.base_ir
-            por_codigo[r.codigo_ir]["valor"] += r.valor_ir
+    # ── Si hay ATS: usar codRetAir como fuente oficial de bases/valores por código IR ──
+    if ats is not None and ats.codigos_ir_presentes:
+        for cod in ats.codigos_ir_presentes:
+            base = ats.base_air_por_codigo(cod)
+            valor = ats.valor_ret_por_codigo(cod)
+            if base > 0 and cod in CELDA_103:
+                c[cod] = base
+            if valor > 0:
+                try:
+                    ret_cas = str(int(cod) + 50)
+                    if ret_cas in CELDA_103:
+                        c[ret_cas] = valor
+                except ValueError:
+                    pass
+    else:
+        # Fallback sin ATS: agrupar retenciones emitidas del RMT por código IR
+        por_codigo: dict[str, dict[str, float]] = defaultdict(lambda: {"base": 0.0, "valor": 0.0})
+        for r in ret_emit:
+            if r.codigo_ir:
+                por_codigo[r.codigo_ir]["base"] += r.base_ir
+                por_codigo[r.codigo_ir]["valor"] += r.valor_ir
+        for cod, montos in por_codigo.items():
+            if montos["base"] > 0 and cod in CELDA_103:
+                c[cod] = round(montos["base"], 2)
+            if montos["valor"] > 0:
+                try:
+                    ret_cas = str(int(cod) + 50)
+                    if ret_cas in CELDA_103:
+                        c[ret_cas] = round(montos["valor"], 2)
+                except ValueError:
+                    pass
 
-    for cod, montos in por_codigo.items():
-        if montos["base"] > 0:
-            c[cod] = round(montos["base"], 2)
-        if montos["valor"] > 0:
-            # Casillero de retención: mismo número + 50 (patrón estándar SRI)
-            try:
-                ret_cas = str(int(cod) + 50)
-                if ret_cas in CELDA_103:
-                    c[ret_cas] = round(montos["valor"], 2)
-            except ValueError:
-                pass
-
-    # Casillero 332 per instrucción: total_retenido + compras_netas - RG - propinas en compras
-    total_ret_valor = sum(r.valor_ir for r in ret_emit)
-    compras_netas_base = sum(d.base_0 + d.base_iva - d.descuento_0 - d.descuento_iva for d in compras)
-    total_rg = sum(d.total for d in gastos_viaje)
-    propinas_compras = sum(d.propina for d in compras)
-    base_332 = round(total_ret_valor + compras_netas_base - total_rg - propinas_compras, 2)
-    if base_332 > 0:
-        c["332"] = base_332
+        # Casillero 332 fallback: total_retenido + compras_netas - RG - propinas en compras
+        total_ret_valor = sum(r.valor_ir for r in ret_emit)
+        compras_netas_base = sum(d.base_0 + d.base_iva - d.descuento_0 - d.descuento_iva for d in compras)
+        total_rg = sum(d.total for d in gastos_viaje)
+        propinas_compras = sum(d.propina for d in compras)
+        base_332 = round(total_ret_valor + compras_netas_base - total_rg - propinas_compras, 2)
+        if base_332 > 0:
+            c["332"] = base_332
 
     # Totales Form 103 (solo casilleros con clave numérica pura)
     def _intval(k: str) -> int | None:

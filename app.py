@@ -9,6 +9,8 @@ import pandas as pd
 import streamlit as st
 
 from src import db
+from src.ats_models import ATSProcesado
+from src.ats_parser import parse_ats
 from src.consolidator import consolidar, exportar_excel
 from src.forms import calcular_formularios, exportar_formulario
 from src.parser import parse
@@ -182,7 +184,12 @@ def _dialog_cargar():
         type=["xlsx", "xlsm"],
         accept_multiple_files=True,
     )
-    st.caption("Los archivos se guardan en `data/rmt_in/` y se procesan al instante.")
+    ats_files = st.file_uploader(
+        "ATS XML opcional (mismo período del RMT) — refina 332, 531 y 407/408",
+        type=["xml"],
+        accept_multiple_files=True,
+    )
+    st.caption("Los archivos se guardan en `data/rmt_in/` y se procesan al instante. El ATS se cruza por RUC.")
     procesar = st.button("Procesar", type="primary", disabled=not uploaded, use_container_width=True)
 
     if procesar and uploaded:
@@ -199,6 +206,18 @@ def _dialog_cargar():
         progreso = st.empty()
         resultados: list[tuple[str, str]] = []
 
+        # Indexar los ATS subidos por RUC para cruzar con cada RMT
+        ats_by_ruc: dict[str, ATSProcesado] = {}
+        for af in ats_files or []:
+            ats_path = DATA_IN / af.name
+            ats_path.write_bytes(af.getbuffer())
+            try:
+                ats = parse_ats(ats_path)
+                if ats.ruc_informante:
+                    ats_by_ruc[ats.ruc_informante] = ats
+            except Exception as exc:
+                resultados.append(("warning", f"ATS {af.name}: no se pudo parsear ({exc}). Se procesará sin ATS."))
+
         for i, file in enumerate(uploaded, 1):
             progreso.info(f"Procesando {i}/{len(uploaded)}: {file.name}")
             t0 = perf_counter()
@@ -206,8 +225,10 @@ def _dialog_cargar():
             local_path.write_bytes(file.getbuffer())
             try:
                 rmt = parse(local_path)
+                ats = ats_by_ruc.get(rmt.ruc)
                 calculado = calcular_formularios(
                     rmt,
+                    ats=ats,
                     obligado_103=obligado_103,
                     base_iess_empleados=base_iess if tiene_empleados else 0.0,
                     retencion_empleados=retencion_empleados if tiene_empleados else 0.0,
@@ -218,8 +239,9 @@ def _dialog_cargar():
                 output = DATA_OUT / f"formularios_{rmt.ruc}_{rmt.periodo_inicio}_{archivo_id}.xlsx"
                 exportar_formulario(template_path, output, calculado)
                 dt = perf_counter() - t0
+                tag = " · con ATS" if ats else ""
                 resultados.append(("success" if dt < 10 else "warning",
-                                   f"{rmt.cliente_nombre} · {rmt.periodo_label} · {dt:.2f} s"))
+                                   f"{rmt.cliente_nombre} · {rmt.periodo_label}{tag} · {dt:.2f} s"))
             except Exception as exc:
                 resultados.append(("error", f"{file.name}: {exc}"))
 
