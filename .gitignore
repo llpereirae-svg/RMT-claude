@@ -23,11 +23,13 @@ dist/
 
 # Streamlit
 .streamlit/secrets.toml
+.streamlit/users.json
 
 # Datos locales (sensibles: RUCs, RMTs reales)
 data/rmt_in/*
 data/rmt_out/*
 data/clientes/*
+data/clientes_*/
 !data/rmt_in/.gitkeep
 !data/rmt_out/.gitkeep
 !data/clientes/.gitkeep

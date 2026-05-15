@@ -8,7 +8,7 @@ from time import perf_counter
 import pandas as pd
 import streamlit as st
 
-from src import db
+from src import db, auth
 from src.ats_models import ATSProcesado
 from src.ats_parser import parse_ats
 from src.consolidator import consolidar, exportar_excel
@@ -87,17 +87,105 @@ st.markdown(
 # ─── Estado de sesión ────────────────────────────────────────────────────────
 if "selected_archivo" not in st.session_state:
     st.session_state.selected_archivo = None
+if "user" not in st.session_state:
+    st.session_state.user = None  # auth.Usuario | None
 
 
 def _flash(level: str, msg: str) -> None:
     {"success": st.success, "warning": st.warning, "error": st.error, "info": st.info}[level](msg)
 
 
-# ─── Sidebar (colapsado por defecto): solo configuración técnica ─────────────
+# ─── Login y cambio forzado de contraseña ───────────────────────────────────
+def _render_login() -> None:
+    """Pantalla de inicio de sesión. Si autentica, escribe en session_state.user."""
+    _c1, c2, _c3 = st.columns([1, 1.2, 1])
+    with c2:
+        st.markdown("""
+        <div style="margin-top:3rem; text-align:center;">
+            <div style="font-size:1.4rem; font-weight:600; color:#32363a;">RMT Suite</div>
+            <div style="font-size:0.85rem; color:#6a6d70; margin-top:0.2rem;">
+                Iniciar sesión para acceder al procesador
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+        with st.container(border=True):
+            with st.form("login_form", clear_on_submit=False):
+                username = st.text_input("Usuario (RUC o cédula)", autocomplete="username")
+                password = st.text_input("Contraseña", type="password", autocomplete="current-password")
+                submitted = st.form_submit_button("Ingresar", type="primary", use_container_width=True)
+            if submitted:
+                user = auth.authenticate(username, password)
+                if user is None:
+                    st.error("Usuario o contraseña incorrectos.")
+                else:
+                    st.session_state.user = user
+                    st.session_state.selected_archivo = None
+                    st.rerun()
+        st.caption("¿No tienes cuenta? Solicita una a tu administrador.")
+
+
+def _render_password_change(user: "auth.Usuario") -> None:
+    """Pantalla que fuerza el cambio de contraseña en el primer login."""
+    _c1, c2, _c3 = st.columns([1, 1.2, 1])
+    with c2:
+        st.markdown(f"""
+        <div style="margin-top:2rem; text-align:center;">
+            <div style="font-size:1.2rem; font-weight:600; color:#32363a;">
+                Cambia tu contraseña provisional
+            </div>
+            <div style="font-size:0.85rem; color:#6a6d70; margin-top:0.3rem;">
+                Hola <b>{user.display_name}</b>. Antes de continuar define una contraseña propia.
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+        with st.container(border=True):
+            with st.form("pwd_change_form", clear_on_submit=False):
+                new1 = st.text_input("Contraseña nueva", type="password",
+                                     autocomplete="new-password",
+                                     help="Mínimo 8 caracteres. Evita contraseñas predecibles.")
+                new2 = st.text_input("Repetir contraseña nueva", type="password",
+                                     autocomplete="new-password")
+                submitted = st.form_submit_button("Guardar contraseña", type="primary",
+                                                  use_container_width=True)
+            if submitted:
+                if len(new1) < 8:
+                    st.error("La contraseña debe tener al menos 8 caracteres.")
+                elif new1 != new2:
+                    st.error("Las dos contraseñas no coinciden.")
+                else:
+                    auth.change_password(user.username, new1)
+                    st.session_state.user = auth.get_user(user.username)
+                    st.success("Contraseña actualizada. Redirigiendo…")
+                    st.rerun()
+
+
+# Gate de autenticación: si no hay sesión, mostrar login y detener
+if st.session_state.user is None:
+    _render_login()
+    st.stop()
+
+# Si el usuario tiene contraseña provisional, forzar cambio
+if st.session_state.user.must_change_password:
+    _render_password_change(st.session_state.user)
+    st.stop()
+
+
+# ─── Sidebar: configuración técnica + usuario actual ─────────────────────────
+USER = st.session_state.user
+USER_DATA_ROOT = auth.user_data_root(USER.username, DEFAULT_CLIENT_ROOT)
+
 with st.sidebar:
+    st.markdown(f"**{USER.display_name}**")
+    st.caption(f"Usuario `{USER.username}`")
+    if st.button("Cerrar sesión", use_container_width=True):
+        st.session_state.user = None
+        st.session_state.selected_archivo = None
+        st.rerun()
+    st.markdown("---")
     st.markdown("### Configuración")
     data_root = Path(
-        st.text_input("Carpeta de bases por cliente", value=str(DEFAULT_CLIENT_ROOT))
+        st.text_input("Carpeta de bases por cliente", value=str(USER_DATA_ROOT),
+                      help="Cada usuario tiene su propia carpeta. No mezcles aquí datos de otros usuarios.")
     )
     template_path = Path(
         st.text_input("Plantilla 104/103", value=str(DEFAULT_TEMPLATE))
@@ -363,19 +451,62 @@ with col_detalle:
                 else:
                     st.caption("Sin documentos.")
 
-            # Descarga
+            # Reprocesar y Descarga
             if not sel_row.empty:
                 r = sel_row.iloc[0]
-                output_files = list(DATA_OUT.glob(f"formularios_{r['ruc']}_{r['periodo_inicio']}_{archivo_id}.xlsx"))
-                if output_files:
-                    with open(output_files[0], "rb") as fh:
-                        st.download_button(
-                            "Descargar formularios (Excel)",
-                            fh.read(),
-                            file_name=output_files[0].name,
-                            mime=MIME_XLSX,
-                            use_container_width=True,
-                        )
+                col_reproc, col_dl = st.columns(2)
+
+                with col_reproc:
+                    if st.button("Reprocesar con config actual", use_container_width=True,
+                                 help="Re-aplica los toggles de la cintilla superior (tipo, 103, contri especial) al RMT original."):
+                        local_rmt = DATA_IN / r["nombre"]
+                        if not local_rmt.exists():
+                            st.error(f"No se encontró el archivo original `{r['nombre']}` en `{DATA_IN}`. "
+                                     "Vuelve a cargarlo desde Cargar RMT.")
+                        else:
+                            try:
+                                rmt2 = parse(local_rmt)
+                                # Buscar ATS del mismo RUC en data/rmt_in (best-effort)
+                                ats2 = None
+                                for xml in DATA_IN.glob("*.xml"):
+                                    try:
+                                        cand = parse_ats(xml)
+                                        if cand.ruc_informante == rmt2.ruc:
+                                            ats2 = cand
+                                            break
+                                    except Exception:
+                                        continue
+                                calc2 = calcular_formularios(
+                                    rmt2,
+                                    ats=ats2,
+                                    obligado_103=obligado_103,
+                                    base_iess_empleados=base_iess if tiene_empleados else 0.0,
+                                    retencion_empleados=retencion_empleados if tiene_empleados else 0.0,
+                                    ventas_0_con_credito=contri_especial,
+                                )
+                                new_id = db.save_result(db_path, rmt2, calc2)
+                                output2 = DATA_OUT / f"formularios_{rmt2.ruc}_{rmt2.periodo_inicio}_{new_id}.xlsx"
+                                if template_path.exists():
+                                    exportar_formulario(template_path, output2, calc2)
+                                st.session_state.selected_archivo = (str(db_path), new_id)
+                                tag = " · con ATS" if ats2 else ""
+                                st.success(f"Reprocesado · 103={'sí' if obligado_103 else 'no'} · "
+                                           f"contri especial={'sí' if contri_especial else 'no'}{tag}")
+                                st.rerun()
+                            except Exception as exc:
+                                st.error(f"Error al reprocesar: {exc}")
+
+                with col_dl:
+                    output_files = list(DATA_OUT.glob(f"formularios_{r['ruc']}_{r['periodo_inicio']}_{archivo_id}.xlsx"))
+                    if output_files:
+                        with open(output_files[0], "rb") as fh:
+                            st.download_button(
+                                "Descargar Excel",
+                                fh.read(),
+                                file_name=output_files[0].name,
+                                mime=MIME_XLSX,
+                                use_container_width=True,
+                            )
 
 
 # ─── Consolidado ─────────────────────────────────────────────────────────────
