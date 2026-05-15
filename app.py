@@ -1,6 +1,7 @@
 """Procesador de Resumen Mensual de Transacciones — UI corporativa local."""
 from __future__ import annotations
 
+import json
 from datetime import datetime
 from pathlib import Path
 from time import perf_counter
@@ -19,8 +20,33 @@ ROOT = Path(__file__).resolve().parent
 DATA_IN = ROOT / "data" / "rmt_in"
 DATA_OUT = ROOT / "data" / "rmt_out"
 DEFAULT_CLIENT_ROOT = ROOT / "data" / "clientes"
-DEFAULT_TEMPLATE = Path(r"C:\Users\llper\OneDrive\Memin\Descargas\FORMULARIO IVA.xlsx")
+# Template incluido en el repo. En local puedes apuntar a otra ruta desde el sidebar.
+REPO_TEMPLATE = ROOT / "templates" / "FORMULARIO_IVA.xlsx"
+LOCAL_TEMPLATE = Path(r"C:\Users\llper\OneDrive\Memin\Descargas\FORMULARIO IVA.xlsx")
+DEFAULT_TEMPLATE = LOCAL_TEMPLATE if LOCAL_TEMPLATE.exists() else REPO_TEMPLATE
 MIME_XLSX = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+
+
+# ─── Hidratar usuarios desde st.secrets (Streamlit Cloud) ────────────────────
+def _hydrate_users_from_secrets() -> None:
+    """En Streamlit Cloud, si no existe el archivo local de usuarios pero hay un
+    secret 'users', escribirlo a disco para que auth.py lo encuentre.
+    En local, este paso no hace nada porque el archivo ya existe."""
+    if auth.USERS_FILE.exists():
+        return
+    try:
+        secret_users = st.secrets.get("users")  # dict TOML anidado
+    except (FileNotFoundError, KeyError, AttributeError):
+        return
+    if not secret_users:
+        return
+    # Convertir Secrets object a dict puro
+    content = {k: dict(v) for k, v in dict(secret_users).items()}
+    auth.USERS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    auth.USERS_FILE.write_text(json.dumps(content, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+_hydrate_users_from_secrets()
 
 st.set_page_config(
     page_title="RMT Suite",
