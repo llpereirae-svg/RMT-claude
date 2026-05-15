@@ -23,7 +23,8 @@ dist/
 
 # Streamlit
 .streamlit/secrets.toml
-.streamlit/users.json
+# .streamlit/users.json — comiteado a propósito para deploy en SCC sin Secrets.
+# Los hashes son PBKDF2-SHA256 con sal aleatoria, no hay claves en plano.
 
 # Datos locales (sensibles: RUCs, RMTs reales)
 data/rmt_in/*

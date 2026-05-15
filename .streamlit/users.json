@@ -1,0 +1,16 @@
+{
+  "0930452024001": {
+    "salt": "1a4709a22087594f37b7957ec9149445",
+    "hash": "533006b341e706691d867201de8e24698fa7aaa4e4f1d16c2b9d6ee13c2386f6",
+    "display_name": "Contador (admin)",
+    "is_admin": true,
+    "must_change_password": true
+  },
+  "0916635154": {
+    "salt": "11deadd264ca7dd9489f1593e4edc1e1",
+    "hash": "c736816da9a2e7cd8bdf79fdf973283786913e53239594ab63d2400ac9575a3f",
+    "display_name": "Colaborador",
+    "is_admin": false,
+    "must_change_password": true
+  }
+}
